@@ -1,103 +1,27 @@
-import express from "express";
-import { paymentMiddleware } from "@x402/express";
+import express, {
+  type Request,
+  type Response,
+  type NextFunction,
+} from "express";
 import { x402ResourceServer, HTTPFacilitatorClient } from "@x402/core/server";
 import { registerExactEvmScheme } from "@x402/evm/exact/server";
 import { writeFileSync, readFileSync, existsSync } from "fs";
+import { paymentMiddleware } from "x402-express";
 
 const app = express();
+app.use(express.json());
 
 // Configuration
-const PAY_TO = "0x376b7271dD22D14D82Ef594324ea14e7670ed5b2";
-const PAYMENTS_FILE = "payments.json";
+const PAY_TO = "0x158301463DdC5D55B2384aF6a3994Baa6aDc555D";
 
-// Payment data structure
-interface PaymentRecord {
-  payer: string;
-  transaction: string;
-  network: string;
-  amount: string;
-  asset: string;
-  payTo: string;
-  ipAddress: string;
-  timestamp: string;
-}
+let currentRequestIP: string;
+let userpath: Map<string, string> = new Map<string, string>();
 
-// Load existing payments
-let payments: PaymentRecord[] = loadPaymentsFromFile();
+// Map to track successful payments by IP address
+const paidUsers: Map<string, boolean> = new Map<string, boolean>();
 
-// Free access tracking (IP -> expiry timestamp)
-const freeAccessMap = new Map<string, number>();
-
-// Active payment tracking (IP -> start timestamp)
-const activePayments = new Map<string, number>();
-
-// Global IP tracking for current request
-let currentRequestIP = "unknown";
-
-// Initialize x402 server
-const facilitatorClient = new HTTPFacilitatorClient({
-  url: "https://x402.org/facilitator",
-});
-
-const server = new x402ResourceServer(facilitatorClient);
-registerExactEvmScheme(server);
-
-// Payment settlement handler
-server.onAfterSettle(async (context) => {
-  const { result, requirements } = context;
-
-  if (result.success) {
-    // Remove from active payments
-    activePayments.delete(currentRequestIP);
-
-    // Grant 10 seconds of free access
-    const freeAccessExpiry = Date.now() + 10000;
-    freeAccessMap.set(currentRequestIP, freeAccessExpiry);
-
-    // Record payment
-    const paymentRecord: PaymentRecord = {
-      payer: result.payer || "unknown",
-      transaction: result.transaction,
-      network: result.network,
-      amount: requirements.amount,
-      asset: requirements.asset,
-      payTo: requirements.payTo,
-      ipAddress: currentRequestIP,
-      timestamp: new Date().toISOString(),
-    };
-
-    payments.push(paymentRecord);
-    savePaymentsToFile();
-
-    console.log(`💰 Payment recorded: ${result.transaction.slice(0, 10)}...`);
-  } else {
-    // Payment failed, remove from active payments
-    activePayments.delete(currentRequestIP);
-  }
-});
-
-function loadPaymentsFromFile(): PaymentRecord[] {
-  if (!existsSync(PAYMENTS_FILE)) return [];
-
-  try {
-    const fileContent = readFileSync(PAYMENTS_FILE, "utf-8").trim();
-    return fileContent ? JSON.parse(fileContent) : [];
-  } catch (error) {
-    console.error("Error loading payments file:", error);
-    return [];
-  }
-}
-
-function savePaymentsToFile() {
-  try {
-    writeFileSync(PAYMENTS_FILE, JSON.stringify(payments, null, 2));
-  } catch (error) {
-    console.error("Error saving payments file:", error);
-  }
-}
-
-// IP extraction middleware
-app.use((req, res, next) => {
+// Helper function to get IP from request
+function getClientIP(req: Request): string {
   const ipAddress =
     req.headers["x-forwarded-for"]?.toString().split(",")[0]?.trim() ||
     req.headers["x-real-ip"]?.toString() ||
@@ -107,91 +31,82 @@ app.use((req, res, next) => {
     "unknown";
 
   // Normalize IPv6 localhost
-  currentRequestIP = ipAddress === "::1" ? "127.0.0.1" : ipAddress;
-  next();
-});
+  return ipAddress === "::1" ? "127.0.0.1" : ipAddress;
+}
 
-// Free access and payment middleware (only for /weather route)
-app.use((req, res, next) => {
-  if (req.path !== "/weather" || req.method !== "GET") {
+const x402middleware = async (
+  req: Request,
+  res: Response,
+  next: NextFunction
+) => {
+  currentRequestIP = getClientIP(req);
+  userpath.set(currentRequestIP, (req.path as string) || "/");
+
+  const hasPaid = paidUsers.get(currentRequestIP) || false;
+  if (hasPaid) {
+    console.log("payment is done now let then access");
     return next();
   }
 
-  const now = Date.now();
-  const freeAccessExpiry = freeAccessMap.get(currentRequestIP);
-  const activePaymentStart = activePayments.get(currentRequestIP);
-
-  // Check for free access
-  if (freeAccessExpiry && now < freeAccessExpiry) {
-    const remainingTime = Math.ceil((freeAccessExpiry - now) / 1000);
-    return res.json({
-      report: { weather: "sunny", temperature: 70 },
-      freeAccess: true,
-      remainingSeconds: remainingTime,
-    });
-  }
-
-  // Check for concurrent payment requests
-  if (activePaymentStart) {
-    const timeSinceStart = now - activePaymentStart;
-    if (timeSinceStart < 5000) {
-      return next(); // Allow concurrent requests within 5 seconds
-    } else {
-      return res.status(409).json({
-        error: "Payment in progress",
-        message:
-          "A payment is already being processed for this IP address. Please wait.",
-      });
-    }
-  }
-
-  // Mark payment as active and proceed
-  activePayments.set(currentRequestIP, now);
-  next();
-});
-
-// x402 Payment middleware
-app.use(
-  paymentMiddleware(
+  const middleware = paymentMiddleware(
+    PAY_TO,
     {
-      "GET /weather": {
-        accepts: [
-          {
-            scheme: "exact",
-            price: "$0.001",
-            network: "eip155:84532",
-            payTo: PAY_TO,
-          },
-        ],
-        description: "Get current weather data for any location",
-        mimeType: "application/json",
+      "/weather": {
+        price: "$0.01",
+        network: "base-sepolia",
+        config: {
+          description: "Access to premium content",
+          mimeType: "application/json",
+          maxTimeoutSeconds: 3600,
+        },
       },
     },
-    server
-  )
-);
+    {
+      url: "https://facilitator.payai.network",
+    }
+  );
 
-// Fallback weather route (only reached if free access middleware didn't handle it)
-app.get("/weather", (req, res) => {
-  res.json({
-    report: {
-      weather: "sunny",
-      temperature: 70,
-    },
+  // Wrap next to track successful payments
+  const wrappedNext = (err?: any) => {
+    if (!err) {
+      // Payment was successful, mark this IP as paid
+      paidUsers.set(currentRequestIP, true);
+      console.log(`Payment successful for IP: ${currentRequestIP}`);
+      console.log("Current paid users:", Object.fromEntries(paidUsers));
+      return next();
+    }
+    return next(err);
+  };
+
+  await middleware(req, res, wrappedNext);
+};
+
+app.use(x402middleware);
+
+app.get("/weather", async (req, res) => {
+  return res.status(200).json({
+    weather: "is sunny",
+    route: "permium",
   });
 });
 
-// Payments endpoint
-app.get("/payments", (req, res) => {
-  res.json({
-    totalPayments: payments.length,
-    payments,
+// Endpoint to check payment status for current IP
+app.get("/payment-status", async (req: Request, res: Response) => {
+  const ip = getClientIP(req);
+  const hasPaid = paidUsers.get(ip) || false;
+  return res.status(200).json({
+    ip,
+    hasPaid,
   });
 });
 
-// Start server
-const PORT = 4021;
-app.listen(PORT, () => {
-  console.log(`🚀 x402 Server running on http://localhost:${PORT}`);
-  console.log(`📊 Loaded ${payments.length} payments from ${PAYMENTS_FILE}`);
+// Helper function to check if an IP has paid
+function hasUserPaid(ip: string): boolean {
+  return paidUsers.get(ip) || false;
+}
+
+// Export the paidUsers map for external access
+
+app.listen(8000, () => {
+  console.log("server is listening on port 9000");
 });

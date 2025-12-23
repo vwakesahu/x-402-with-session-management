@@ -2,6 +2,7 @@ import { x402Client, wrapAxiosWithPayment, x402HTTPClient } from "@x402/axios";
 import { registerExactEvmScheme } from "@x402/evm/exact/client";
 import { privateKeyToAccount } from "viem/accounts";
 import axios from "axios";
+import type { AxiosResponse } from "axios";
 
 const signer = privateKeyToAccount(
   process.env.EVM_PRIVATE_KEY as `0x${string}`
@@ -10,12 +11,28 @@ const client = new x402Client();
 registerExactEvmScheme(client, { signer });
 
 const api = wrapAxiosWithPayment(
-  axios.create({ baseURL: "http://localhost:4021" }),
+  axios.create({ baseURL: "http://localhost:8000" }),
   client
 );
 
-const response = await api.get("/weather");
-console.log("Response:", response.data);
+let response: AxiosResponse;
+try {
+  response = await api.get("/");
+  console.log("Response status:", response.status);
+  console.log("Response data:", response.data);
+} catch (error: any) {
+  if (error.response?.status === 402) {
+    console.log("❌ Payment required - user has NOT paid");
+    console.log("Payment details:", error.response.data);
+  } else {
+    console.log("Error in fetching:", error.message);
+  }
+  process.exit(1);
+}
+// const response = await axios.get("http://localhost:4021/weather");
+
+// console.log(response);
+// console.log("Response:", response.data);
 
 // Check if this was a paid request or free access
 const paymentResponseHeader =
