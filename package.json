@@ -1,0 +1,27 @@
+{
+  "name": "x-402-success",
+  "module": "index.ts",
+  "type": "module",
+  "scripts": {
+    "start": "bun run index.ts",
+    "dev": "bun --hot index.ts",
+    "do-payment": "bun run scripts/do-payment.ts"
+  },
+  "private": true,
+  "devDependencies": {
+    "@types/bun": "latest",
+    "dotenv": "^17.2.3"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@types/express": "^5.0.6",
+    "@x402/axios": "^2.0.0",
+    "@x402/core": "^2.0.0",
+    "@x402/evm": "^2.0.0",
+    "@x402/express": "^2.0.0",
+    "express": "^5.2.1",
+    "viem": "^2.43.3"
+  }
+}
